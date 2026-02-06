@@ -1,0 +1,245 @@
+---
+title: "R Notebook"
+output:
+  html_document:
+    df_print: paged
+---
+
+# 0. Reading clean data
+
+```{r}
+library(tidyverse)
+library(dplyr)
+library(ggplot2)
+```
+
+```{r}
+data <- read.csv('stimuli_results.csv')
+view(data)
+```
+
+# 1. Making the column with correctness values for each participant
+
+```{r}
+correct_answers <- data %>% # counting correct answers for each participant
+  filter(is_judgement_correct == 'correct') %>%
+  group_by(participant_id) %>%
+  summarise(num_correct = n())
+
+total_questions <- data %>% # counting questions for each participant
+  group_by(participant_id) %>%
+  summarise(total_questions = n())
+
+accuracy <- left_join(total_questions, correct_answers, by = "participant_id") %>%
+  mutate(num_correct = ifelse(is.na(num_correct), 0, num_correct)) %>%
+  mutate(correctness_ratio = num_correct / total_questions)
+
+data1 <- left_join(correctness, data, by = "participant_id")
+
+view(data1)
+
+# write.csv(data1, 'datawithcorrectness.csv')
+```
+
+# 2. Descriptive statistics
+
+
+```{r}
+# удаляем строки, в которых нет необходимых данных
+data1 <- data1[!(is.na(data$proficiency) & is.na(data$lextale_score)), ]
+
+data2 <- data1[!duplicated(data1$participant_id), ] # у каждого участника одни и те же соц.линг. данные, так что можно взять просто первую строку
+view(data2)
+
+# 1. Обработка количественных переменных
+quantitative_vars <- c("age", "lextale_score", "age_of_acquisition")
+
+for (var in quantitative_vars) {
+  if (var %in% names(data2)) {
+    # Преобразуем в числовой формат (если еще не числовой)
+    data2[[var]] <- as.numeric(as.character(data2[[var]]))
+    
+    # Вычисляем среднее и стандартное отклонение
+    mean_val <- mean(data2[[var]], na.rm = TRUE)
+    sd_val <- sd(data2[[var]], na.rm = TRUE)
+
+    cat(sprintf("Переменная: %s\n", var))
+    cat(sprintf("Среднее: %.2f\n", mean_val))
+    cat(sprintf("Стандартное отклонение: %.2f\n\n", sd_val))
+  } else {
+    cat(sprintf("Переменная %s не найдена в датасете\n\n", var))
+  }
+}
+```
+
+```{r}
+# 2. Обработка качественных переменных
+
+qualitative_vars <- c("gender", "proficiency", "language_environment", 
+                     "language_use", "acquisition_vs_learning")
+
+for (var in qualitative_vars) {
+  if (var %in% names(data1)) {
+    # Преобразуем в категориальную переменную
+    data2[[var]] <- as.factor(data2[[var]])
+    
+    # Переменную уровня языка делаем порядковой
+    data$proficiency <- factor(data$proficiency, 
+                          levels = c("B1", "B2", "C1", "C2"),
+                          ordered = TRUE)
+    
+    # Получаем таблицу частот
+    freq_table <- table(data2[[var]])
+    
+    cat(sprintf("Переменная: %s\n", var))
+    print(freq_table)
+    cat("\n")
+  } else {
+    cat(sprintf("Переменная %s не найдена в датасете\n\n", var))
+  }
+}
+```
+
+# 3. Pre-Making models.
+
+## 3. 1. Checking for intrapersonal variation
+
+
+Interpretation: unclear, not enough participants.
+
+```{r}
+ggplot(data1, aes(lextale_score, correctness_ratio, color=participant_id, group=participant_id)) +
+  geom_point() +
+  geom_smooth(method='lm', se=FALSE) +
+  theme(legend.position='none')
+```
+Interpretation: not enough participants, hard to tell.
+
+## 3. 2. Checking for correlation
+
+```{r}
+data1 %>% select(c("lextale_score", "age_of_acquisition", "correctness_ratio")) -> data_corr
+
+corrplot::corrplot(
+  cor(data_corr),
+  type = "upper",
+  p.mat = corrplot::cor.mtest(data_corr)$p,
+  sig.level = 0.05
+)
+```
+Interpretation: medium correlation between lextale_score and correctness exists!
+
+```{r}
+data2$proficiency_num <- as.numeric(data2$proficiency)
+cor.test(data2$proficiency_num, data2$correctness_ratio, method = "spearman")
+cor.test(data2$proficiency_num, data2$lextale_score, method = "spearman")
+```
+Interpretation: we can't put both lextale_score and proficiency in the same model as thay are clearly correlated, but proficiency clearly correlates with correctness so it makes sense to make a separate model for it.
+
+# 4. Models: lextale + congruency.
+```{r}
+model <- lm(correctness_ratio ~ lextale_score * congruency, data=data1)
+plot(model)
+
+```
+
+#### 4. 1. Normal distribution of errors and outliers
+
+```{r}
+ggplot(aes(sample = .resid), data = model) +
+  geom_qq() +
+  geom_qq_line()
+```
+
+
+#### 4. 2. Homoscedacity
+```{r}
+library(lmtest)
+bptest(correctness_ratio ~ lextale_score * congruency, data=data1)
+```
+Int.: distribution is homoscedastic, everything is fine.
+
+#### 4. 3. Linearity
+```{r}
+library(car)
+model0 <- lm(correctness_ratio ~ lextale_score + congruency, data=data1)
+crPlots(model0, id = TRUE)
+```
+
+# 5. Models: proficiency + congruency.
+
+```{r}
+model1 <- lm(correctness_ratio ~ proficiency * congruency, data=data1)
+plot(model1)
+```
+
+#### 5.1. Normal distribution of errors and outliers
+
+```{r}
+ggplot(aes(sample = .resid), data = model1) +
+  geom_qq() +
+  geom_qq_line()
+```
+
+#### 5. 2. Homoscedacity
+```{r}
+bptest(correctness_ratio ~ proficiency * congruency, data=data1)
+```
+
+## 6. Models for check without congruency.
+
+```{r}
+modelcheck <- lm(correctness_ratio ~ lextale_score, data=data1)
+modelcheck1 <- lm(correctness_ratio ~ proficiency, data=data1)
+```
+
+## 7. Assumptions: quick check with glvma()
+
+```{r}
+library(gvlma)
+summary(gvlma(model))
+summary(gvlma(model1))
+summary(gvlma(modelcheck))
+summary(gvlma(modelcheck1))
+```
+
+## Interpretations of models.
+
+```{r}
+summary(model)
+```
+
+```{r}
+summary(model1)
+```
+
+```{r}
+summary(modelcheck)
+```
+
+```{r}
+summary(modelcheck1)
+```
+
+## 8. Model only with congruency: 
+```{r}
+modelcheck3 <- lm(correctness_ratio ~ as.factor(congruency), data=data1)
+```
+
+```{r}
+summary(modelcheck3)
+```
+
+```{r}
+logit_model <- glm(correctness_ratio ~ as.factor(congruency), data = data1)
+summary(logit_model)
+```
+
+```{r}
+AIC(model); BIC(model)
+AIC(model1); BIC(model1)
+AIC(modelcheck); BIC(modelcheck)
+AIC(modelcheck1); BIC(modelcheck1)
+AIC(modelcheck3); BIC(modelcheck3)
+
+```
